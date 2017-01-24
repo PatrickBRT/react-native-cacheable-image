@@ -11,8 +11,11 @@ export default class CacheableImage extends React.Component {
 
     constructor(props) {
         super(props)
-        this.imageDownloadBegin = this.imageDownloadBegin.bind(this);
+
         this._checkForFilePathAndDeleteIfPresent = this._checkForFilePathAndDeleteIfPresent.bind(this);
+        this._isFileInCache = this._isFileInCache.bind(this);
+
+        this.imageDownloadBegin = this.imageDownloadBegin.bind(this);
         this._handleConnectivityChange = this._handleConnectivityChange.bind(this);
 
         this.state = {
@@ -54,23 +57,48 @@ export default class CacheableImage extends React.Component {
       });
     }
 
+    _isFileInCache(imageUri, cachePath, cacheKey) ~~{
+      console.log('>> '+filePath);
+      const filePath = dirPath+'/'+cacheKey;
+      const isFileInCachePromise = new Promise();
+      RNFS.stat(filePath).then((res) => {
+        throw new Error();
+          if (res.isFile()) {
+              isFileInCachePromise.resolve(true);
+          }
+      })
+      .catch((err) => {
+        isFileInCachePromise.resolve(false);
+      });
+      return isFileInCacµhePromise;
+    }
 
     async checkImageCache(imageUri, cachePath, cacheKey) {
-        const dirPath = DocumentDirectoryPath+'/'+cachePath;
+        this._isFileInCache(imageUri, cachePath, cacheKey).then((isInCache) => {
+          if (isInCache) {
+            console.log('cache hit!');
+            this.setState({cacheable: true, cachedImagePath: filePath});
+          } else {
+            console.log('- file doesnt exist => download');
+          }
+        });
+
+
+      /*  const dirPath = DocumentDirectoryPath+'/'+cachePath;
         const filePath = dirPath+'/'+cacheKey;
         console.log('>> '+filePath);
         RNFS.stat(filePath).then((res) => {
           throw new Error();
             if (res.isFile()) {
                 // means file exists, ie, cache-hit
-                console.log('cache hit!');
-                this.setState({cacheable: true, cachedImagePath: filePath});
-            }
+              }
         })
         .catch((err) => {
+            console.log('- file doesnt exist');
             // means file does not exist
             // first make sure network is available..
             if (! this.state.networkAvailable) {
+                console.log('> no network!');
                 this.setState({cacheable: false, cachedImagePath: null});
                 return;
             }
@@ -79,6 +107,7 @@ export default class CacheableImage extends React.Component {
             // The NSURLIsExcludedFromBackupKey property can be provided to set this attribute on iOS platforms.
             // Apple will reject apps for storing offline cache data that does not have this attribute.
             // https://github.com/johanneslumpe/react-native-fs#mkdirfilepath-string-options-mkdiroptions-promisevoid
+            console.log(dirPath);
             RNFS.mkdir(dirPath, {NSURLIsExcludedFromBackupKey: true}).then(() => {
                 // before we change the cachedImagePath.. if the previous cachedImagePath was set.. remove it
                 if (this.state.cacheable && this.state.cachedImagePath) {
@@ -107,10 +136,11 @@ export default class CacheableImage extends React.Component {
                     })
                   })
                   .catch((err) => {
-                    console.log('x download');
+                    console.log('x checkForFileAndDeleteIfPresent (old File delete)');
                   })
                 })
                 .catch((err) => {
+                    console.log('x download');
                     console.log(err);  // error occurred while downloading or download stopped.. remove file if created
                     this._checkForFilePathAndDeleteIfPresent(filePath);
                     this.setState({cacheable: false, cachedImagePath: null});
@@ -120,7 +150,7 @@ export default class CacheableImage extends React.Component {
                 this._checkForFilePathAndDeleteIfPresent(filePath);
                 this.setState({cacheable: false, cachedImagePath: null});
             })
-        });
+        });*/
     }
 
     _processSource(source) {
