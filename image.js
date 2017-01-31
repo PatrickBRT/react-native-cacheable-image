@@ -1,21 +1,36 @@
 import React from 'react';
-import { get } from '../lodash/'
-import { Image, ActivityIndicator, NetInfo } from 'react-native';
+import { get, find, remove } from '../lodash/'
+import { Image, AsyncStorage, ActivityIndicator, NetInfo } from 'react-native';
 import RNFS, { DocumentDirectoryPath } from 'react-native-fs';
 import ResponsiveImage from 'react-native-responsive-image';
+
+import { Worker, WorkerQueue } from './workerQueue';
+import WorkerAwareRNFS from './workerAwareRNFS';
+
+import { ImageStore } from './imageStore';
 
 const SHA1 = require("crypto-js/sha1");
 const URL = require('url-parse');
 
+const cachePath = 'runtastic';
+
 export default class CacheableImage extends React.Component {
+    _checkForFilePathAndDeleteIfPresent: Function;
+    _workerQueue: WorkerQueue;
+    _imageStore: ImageStore;
 
     constructor(props) {
         super(props)
 
-        this._checkForFilePathAndDeleteIfPresent = this._checkForFilePathAndDeleteIfPresent.bind(this);
-        this._isFileInCache = this._isFileInCache.bind(this);
+        _workerQueue = new WorkerQueue();
+        _imageStore = new ImageStore();
 
-        this.imageDownloadBegin = this.imageDownloadBegin.bind(this);
+        this._callAsWorker = this._callAsWorker.bind(this);
+        this._isFileInCache = this._isFileInCache.bind(this);
+        this._copyFileWithSuffix = this._copyFileWithSuffix.bind(this);
+        this._getCacheKeyForUrl = this._getCacheKeyForUrl.bind(this);
+        this.deleteFromCache = this.deleteFromCache.bind(this);
+
         this._handleConnectivityChange = this._handleConnectivityChange.bind(this);
 
         this.state = {
@@ -40,117 +55,74 @@ export default class CacheableImage extends React.Component {
         return true;
     }
 
-    async imageDownloadBegin(info) {
-        const contentType = get(info,['headers', 'Content-Type']);
-        _fileType = contentType.substring(contentType.lastIndexOf('/')+1);
+    _callAsWorker(id: string, operation: string, action: Function, ...params) {
+      const worker = new Worker(id, operation, action, params);
+      return _workerQueue.addWorker(worker);
     }
 
-    async _checkForFilePathAndDeleteIfPresent(filePath) {
-      return RNFS.exists(filePath).then((exists) => {
-        let promiseToWaitFor = null;
-        if (exists) {
-          promiseToWaitFor = RNFS.unlink(filePath);
-        } else {
-          promiseToWaitFor = Promise.resolve();
-        }
-        return promiseToWaitFor;
-      });
-    }
-
-    _isFileInCache(imageUri, cachePath, cacheKey) ~~{
-      console.log('>> '+filePath);
-      const filePath = dirPath+'/'+cacheKey;
-      const isFileInCachePromise = new Promise();
-      RNFS.stat(filePath).then((res) => {
-        throw new Error();
+    _isFileInCache(filePath) {
+      console.log('? file='+filePath)
+      const that = this;
+      return new Promise(function(resolve, reject) {
+        WorkerAwareRNFS.stat(filePath).then((res) => {
           if (res.isFile()) {
-              isFileInCachePromise.resolve(true);
+              resolve({
+                isInCache: true,
+                modifiedTimestamp: res.mtime
+              });
           }
-      })
-      .catch((err) => {
-        isFileInCachePromise.resolve(false);
-      });
-      return isFileInCacµhePromise;
-    }
-
-    async checkImageCache(imageUri, cachePath, cacheKey) {
-        this._isFileInCache(imageUri, cachePath, cacheKey).then((isInCache) => {
-          if (isInCache) {
-            console.log('cache hit!');
-            this.setState({cacheable: true, cachedImagePath: filePath});
-          } else {
-            console.log('- file doesnt exist => download');
-          }
-        });
-
-
-      /*  const dirPath = DocumentDirectoryPath+'/'+cachePath;
-        const filePath = dirPath+'/'+cacheKey;
-        console.log('>> '+filePath);
-        RNFS.stat(filePath).then((res) => {
-          throw new Error();
-            if (res.isFile()) {
-                // means file exists, ie, cache-hit
-              }
         })
         .catch((err) => {
-            console.log('- file doesnt exist');
-            // means file does not exist
-            // first make sure network is available..
-            if (! this.state.networkAvailable) {
-                console.log('> no network!');
-                this.setState({cacheable: false, cachedImagePath: null});
-                return;
-            }
+          resolve({isInCache: false});
+        });
+      });
+    }
 
-            // then make sure directory exists.. then begin download
-            // The NSURLIsExcludedFromBackupKey property can be provided to set this attribute on iOS platforms.
-            // Apple will reject apps for storing offline cache data that does not have this attribute.
-            // https://github.com/johanneslumpe/react-native-fs#mkdirfilepath-string-options-mkdiroptions-promisevoid
-            console.log(dirPath);
-            RNFS.mkdir(dirPath, {NSURLIsExcludedFromBackupKey: true}).then(() => {
-                // before we change the cachedImagePath.. if the previous cachedImagePath was set.. remove it
-                if (this.state.cacheable && this.state.cachedImagePath) {
-                    let delImagePath = this.state.cachedImagePath;
-                    this._checkForFilePathAndDeleteIfPresent(delImagePath);
-                }
 
-                let downloadOptions = {
-                    fromUrl: imageUri,
-                    toFile: filePath,
-                    background: true,
-                    begin: this.imageDownloadBegin,
-                };
+  _copyFileWithSuffix(oldFilePath, suffix) {
+    const newFilePath = `${oldFilePath}.${suffix}`
+    // using that because "this" is a different "this" inside the promise
+    return new Promise(function(resolve, reject) {
+      WorkerAwareRNFS.deleteIfFileExists(newFilePath).then(() => {
+        WorkerAwareRNFS.copyFile(oldFilePath, newFilePath).then(()=>{
+          resolve(newFilePath);
+        }).catch((err) => { reject(err)});
+      })
+        .catch((err) => { reject(err)});
+    });
+  }
 
-                // directory exists.. begin download
-                console.log('- downloading '+imageUri);
-                RNFS.downloadFile(downloadOptions).promise.then((result) => {
-                    const oldFilePath = filePath;
-                    const newFilePath = filePath+'.'+_fileType;
-                    console.log('√ download');
+    async deleteFromCache(imageUri) {
+      const cacheKey = this._getCacheKeyForUrl(new URL(imageUri, null, true));
+      const dirPath = DocumentDirectoryPath+'/'+cachePath;
+      const filePath = dirPath+'/'+cacheKey;
 
-                    this._checkForFileAndDeleteIfPresent(newFilePath).then(() => {
-                      RNFS.copyFile(oldFilePath, newFilePath).then(()=>{
-                      console.log(oldFilePath+'/'+newFilePath);
-                      this.setState({cacheable: true, cachedImagePath: newFilePath});
-                    })
-                  })
-                  .catch((err) => {
-                    console.log('x checkForFileAndDeleteIfPresent (old File delete)');
-                  })
-                })
-                .catch((err) => {
-                    console.log('x download');
-                    console.log(err);  // error occurred while downloading or download stopped.. remove file if created
-                    this._checkForFilePathAndDeleteIfPresent(filePath);
-                    this.setState({cacheable: false, cachedImagePath: null});
-                });
-            })
-            .catch((err) => {
-                this._checkForFilePathAndDeleteIfPresent(filePath);
-                this.setState({cacheable: false, cachedImagePath: null});
-            })
-        });*/
+      return this._checkForFilePathAndDeleteIfPresent(filePath);
+    }
+
+
+
+    async checkImageCache(imageUri, cacheKey) {
+      const dirPath = DocumentDirectoryPath+'/'+cachePath;
+      const filePath = dirPath+'/'+cacheKey;
+
+      // check if we know something about this file
+      _imageStore.get(cacheKey).then((value) => {
+        if (value != null) {
+          this.setState({ cacheable: true, cachedImagePath: value});
+        } else {
+          console.log('caching '+imageUri);
+          _imageStore.put(imageUri).then((newImagePath) => {
+            console.log(newImagePath);
+            this.setState({ cacheable: true, cachedImagePath: newImagePath});
+          })
+        }
+    });
+
+    }
+
+    _getCacheKeyForUrl(url: Url) {
+      return SHA1(url.pathname);
     }
 
     _processSource(source) {
@@ -160,9 +132,9 @@ export default class CacheableImage extends React.Component {
             && source.hasOwnProperty('uri')) {
             const url = new URL(source.uri, null, true);
 
-            const cacheKey = SHA1(url.pathname);
+            const cacheKey = this._getCacheKeyForUrl(url);
 
-            this.checkImageCache(source.uri, 'runtastic', cacheKey);
+            this.checkImageCache(source.uri, cacheKey);
             this.setState({isRemote: true});
         }
         else {
@@ -195,16 +167,8 @@ export default class CacheableImage extends React.Component {
     };
 
     render() {
-        if (!this.state.isRemote) {
-            return this.renderLocal();
-        }
-
         if (this.state.cacheable && this.state.cachedImagePath) {
             return this.renderCache();
-        }
-
-        if (this.props.defaultSource) {
-            return this.renderDefaultSource();
         }
 
         return (
@@ -214,28 +178,11 @@ export default class CacheableImage extends React.Component {
 
     renderCache() {
         const { children, defaultSource, activityIndicatorProps, ...props } = this.props;
-        return (
-            <Image {...props} source={{uri: 'file://'+this.state.cachedImagePath}}>
-            {children}
-            </Image>
-        );
-    }
 
-    renderLocal() {
-        const { children, defaultSource, activityIndicatorProps, ...props } = this.props;
         return (
-            <ResponsiveImage {...props}>
+          <Image {...props} source={{uri: 'file://'+this.state.cachedImagePath}}>
             {children}
-            </ResponsiveImage>
-        );
-    }
-
-    renderDefaultSource() {
-        const { children, defaultSource, ...props } = this.props;
-        return (
-            <CacheableImage {...props} source={defaultSource}>
-            {children}
-            </CacheableImage>
+          </Image>
         );
     }
 }
